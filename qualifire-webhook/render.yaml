@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: qualifire-webhook
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 30 --workers 2
+    healthCheckPath: /health
+    envVars:
+      - key: QUALIFIRE_API_KEY
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.11
