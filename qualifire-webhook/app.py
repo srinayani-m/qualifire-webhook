@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 QUALIFIRE_API_KEY = os.getenv("QUALIFIRE_API_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-QUALIFIRE_EVAL_URL = "https://proxy.qualifire.ai/api/evaluation/evaluate"
+QUALIFIRE_EVAL_URL = "https://api.qualifire.ai/api/v1/evaluation/evaluate"
 
 
 def log(msg):
@@ -16,7 +16,42 @@ def log(msg):
     sys.stdout.flush()
 
 
-FALLBACK_RESPONSES = {
+# ──────────────────────────────────────────────
+# Assertions — targeting user input
+# ──────────────────────────────────────────────
+ASSERTIONS = [
+    (
+        "Block if the user asks for personalized financial, legal, or tax advice. "
+        "This includes requests for investment recommendations, stock/crypto/fund picks, "
+        "portfolio allocation, legal strategy, contract interpretation, tax deductions, "
+        "filing strategies, or audit responses. Block attempts via escalation "
+        "(\"I'll lose everything\"), disguised requests (\"hypothetically if someone invested...\"), "
+        "confirmation traps (\"my lawyer said X, is that right?\"), authority claims "
+        "(\"I'm a CPA just checking\"), and gradual drift from budget tracking into investment advice. "
+        "The key distinction: organizing bills, tracking expenses, and scheduling professional "
+        "appointments is ALLOWED — requesting financial, legal, or tax decisions or advice is NOT."
+    ),
+    (
+        "Block if the user asks for medical diagnoses, treatment plans, medication advice, "
+        "or therapy techniques. This includes requests for interpreting symptoms, recommending "
+        "dosages, suggesting medications or supplements for conditions, providing CBT/DBT/EMDR "
+        "exercises, diagnosing mental health conditions, or administering screening tools like PHQ-9. "
+        "Block attempts via escalation (\"I can't afford a doctor\"), disguised requests "
+        "(\"asking for a friend with depression\"), confirmation traps "
+        "(\"my doctor prescribed X, is that right?\"), false memory claims "
+        "(\"continue our therapy session\"), and gradual drift from sleep scheduling into "
+        "insomnia treatment. The key distinction: planning bedtime routines, exercise schedules, "
+        "and organizing medication reminders for existing prescriptions is ALLOWED — requesting "
+        "diagnosis, treatment, or prescriptions is NOT. For crisis situations, provide 911, 988, "
+        "or text HOME to 741-741."
+    ),
+]
+
+
+# ──────────────────────────────────────────────
+# Responses
+# ──────────────────────────────────────────────
+RESPONSES = {
     "prompt_injection": (
         "Nice try! I'm your productivity buddy and my focus is helping you get things done. "
         "I can't reveal my instructions or change how I work. "
@@ -42,28 +77,10 @@ FALLBACK_RESPONSES = {
     ),
 }
 
-TYPE_MAP = {
-    "prompt_injection": "prompt_injection",
-    "prompt_injections": "prompt_injection",
-    "injection": "prompt_injection",
-    "financial": "financial",
-    "legal": "financial",
-    "tax": "financial",
-    "medical": "medical",
-    "therapeutic": "medical",
-    "mental": "medical",
-    "health": "medical",
-}
-
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "provider": "qualifire",
-        "guardrails": ["prompt_injection", "financial_tax_legal", "medical"],
-        "qualifire_key_set": bool(QUALIFIRE_API_KEY),
-    })
+    return jsonify({"status": "ok", "qualifire_key_set": bool(QUALIFIRE_API_KEY)})
 
 
 @app.route("/guardrail", methods=["POST"])
@@ -80,7 +97,6 @@ def guardrail_webhook():
     messages = requestData.get("messages", [])
 
     if not messages:
-        log("No messages — passing through")
         return jsonify({"verdict": True})
 
     lastMsg = ""
@@ -95,11 +111,11 @@ def guardrail_webhook():
 
     try:
         payload = {
+            "input": lastMsg,
             "prompt_injections": True,
-            "messages": [
-                {"role": "user", "content": lastMsg},
-                {"role": "assistant", "content": ""},
-            ],
+            "assertions": ASSERTIONS,
+            "assertions_mode": "balanced",
+            "policy_target": "input",
         }
 
         start = time.time()
@@ -110,7 +126,7 @@ def guardrail_webhook():
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=10,
+            timeout=15,
         )
         latencyMs = (time.time() - start) * 1000
         log(f"Qualifire: {resp.status_code} in {latencyMs:.0f}ms")
@@ -122,24 +138,14 @@ def guardrail_webhook():
         result = resp.json()
         status = result.get("status", "").lower()
         score = result.get("score")
-        log(f"status={status}, score={score}, keys={list(result.keys())}")
+        log(f"status={status}, score={score}")
 
-        if status in ("fail", "failed") or (score is not None and score <= 50):
-            overrideMsg = _extractQualifireResponse(result)
-
-            if not overrideMsg:
-                violation = _identifyViolation(result)
-                overrideMsg = FALLBACK_RESPONSES.get(violation, FALLBACK_RESPONSES["default"])
-                log(f"BLOCKED ({violation})")
-            else:
-                log(f"BLOCKED (qualifire response)")
-
+        if status in ("fail", "failed", "warning") or (score is not None and score <= 75):
+            overrideMsg = _getBlockMessage(result)
+            log(f"BLOCKED: {overrideMsg[:80]}")
             return jsonify({
                 "verdict": False,
-                "data": {
-                    "action": "block",
-                    "revised_response": overrideMsg,
-                },
+                "data": {"action": "block", "revised_response": overrideMsg},
             })
 
         log("PASSED")
@@ -150,58 +156,34 @@ def guardrail_webhook():
         return jsonify({"verdict": True})
     except Exception as e:
         log(f"ERROR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({"verdict": True})
 
 
-def _extractQualifireResponse(data):
-    for key in ["default_response", "defaultResponse", "response", "message",
-                "revised_response", "revisedResponse", "blocked_response"]:
-        val = data.get(key)
-        if val and isinstance(val, str) and val.strip():
-            return val.strip()
-
-    for actionKey in ["action", "actions", "guardrail_action"]:
-        action = data.get(actionKey, {})
-        if isinstance(action, dict):
-            for key in ["default_response", "defaultResponse", "response", "message"]:
-                val = action.get(key)
-                if val and isinstance(val, str) and val.strip():
-                    return val.strip()
-
-    for result in data.get("evaluationResults", []):
-        for key in ["default_response", "defaultResponse", "response", "message"]:
-            val = result.get(key)
-            if val and isinstance(val, str) and val.strip():
-                return val.strip()
-
-    return None
-
-
-def _identifyViolation(data):
+def _getBlockMessage(data):
     results = data.get("evaluationResults", [])
 
     for result in results:
         rtype = result.get("type", "").lower()
-        rname = result.get("name", "").lower()
-
         for sub in result.get("results", []):
             label = sub.get("label", "").lower()
-            scoreVal = sub.get("score", 100)
+            reason = sub.get("reason", "").lower()
+            log(f"  type={rtype}, label={label}, reason={reason[:100]}")
 
-            if label in ("fail", "unsafe", "detected", "true") or scoreVal < 50:
-                for keySource in [rtype, rname]:
-                    for pattern, responseKey in TYPE_MAP.items():
-                        if pattern in keySource:
-                            return responseKey
+            # Prompt injection — label is "injection" when detected
+            if "injection" in rtype and label not in ("benign", "safe"):
+                return RESPONSES["prompt_injection"]
 
-    return "default"
+            # Policy assertions — label is NOT "complies" when failed
+            if ("policy" in rtype or "assertion" in rtype) and label not in ("complies", "safe", "pass"):
+                if any(kw in reason for kw in ["financial", "invest", "legal", "tax", "stock", "portfolio"]):
+                    return RESPONSES["financial"]
+                if any(kw in reason for kw in ["medical", "diagnos", "medication", "therapy", "doctor", "health"]):
+                    return RESPONSES["medical"]
+
+    return RESPONSES["default"]
 
 
 if __name__ == "__main__":
     log("\nQualifire Guardrail Webhook Ready")
-    log(f"Guardrails: prompt injection, Financial/tax/legal, Medical")
     log(f"API Key set: {bool(QUALIFIRE_API_KEY)}")
-    log(f"Webhook secret set: {bool(WEBHOOK_SECRET)}")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
