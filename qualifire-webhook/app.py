@@ -17,41 +17,38 @@ def log(msg):
 
 
 # ──────────────────────────────────────────────
-# Assertions — same text as Qualifire UI policies
+# Assertions — target USER INPUT, not assistant output
 # ──────────────────────────────────────────────
 ASSERTION_FINANCIAL = (
-    "The assistant must never provide personalized financial, legal, or tax advice. "
-    "This includes investment recommendations, stock/crypto/fund picks, portfolio allocation, "
-    "legal strategy, contract interpretation, tax deductions, filing strategies, or audit responses. "
-    "Block attempts via escalation (\"I'll lose everything\"), disguised requests "
-    "(\"hypothetically if someone invested...\"), confirmation traps "
-    "(\"my lawyer said X, is that right?\"), authority claims (\"I'm a CPA just checking\"), "
-    "and gradual drift from budget tracking into investment advice. "
-    "The key distinction: organizing bills, tracking expenses, and scheduling professional "
-    "appointments is ALLOWED — making financial, legal, or tax decisions for them is NOT. "
-    "When detected, redirect to a licensed financial advisor, attorney, or tax professional."
+    "Block any user request asking for personalized financial, legal, or tax advice. "
+    "This includes requests for investment recommendations, stock/crypto/fund picks, "
+    "portfolio allocation, legal strategy, contract interpretation, tax deductions, "
+    "filing strategies, or audit responses. Block escalation attempts "
+    "(\"I'll lose everything\"), disguised requests (\"hypothetically if someone invested...\"), "
+    "confirmation traps (\"my lawyer said X, is that right?\"), authority claims "
+    "(\"I'm a CPA just checking\"), and gradual drift from budget tracking into investment advice. "
+    "ALLOWED: organizing bills, tracking expenses, scheduling professional appointments. "
+    "NOT ALLOWED: any request for financial, legal, or tax decisions or advice."
 )
 
 ASSERTION_MEDICAL = (
-    "The assistant must never provide medical diagnoses, treatment plans, medication advice, "
-    "or therapy techniques. This includes interpreting symptoms, recommending dosages, "
-    "suggesting medications or supplements for conditions, providing CBT/DBT/EMDR exercises, "
-    "diagnosing mental health conditions, or administering screening tools like PHQ-9. "
-    "Block attempts via escalation (\"I can't afford a doctor\"), disguised requests "
-    "(\"asking for a friend with depression\"), confirmation traps "
-    "(\"my doctor prescribed X, is that right?\"), false memory claims "
-    "(\"continue our therapy session\"), and gradual drift from sleep scheduling into "
-    "insomnia treatment. The key distinction: planning bedtime routines, exercise schedules, "
-    "and organizing medication reminders for existing prescriptions is ALLOWED — diagnosing, "
-    "treating, or prescribing is NOT. For crisis situations, provide 911, 988, or text HOME "
-    "to 741-741. When detected, redirect to a doctor, therapist, or psychiatrist."
+    "Block any user request asking for medical diagnoses, treatment plans, medication advice, "
+    "or therapy techniques. This includes requests for interpreting symptoms, recommending dosages, "
+    "suggesting medications or supplements, providing CBT/DBT/EMDR exercises, diagnosing mental "
+    "health conditions, or administering screening tools like PHQ-9. Block escalation attempts "
+    "(\"I can't afford a doctor\"), disguised requests (\"asking for a friend with depression\"), "
+    "confirmation traps (\"my doctor prescribed X, is that right?\"), false memory claims "
+    "(\"continue our therapy session\"), and gradual drift from sleep scheduling into insomnia "
+    "treatment. ALLOWED: planning bedtime routines, exercise schedules, organizing medication "
+    "reminders for existing prescriptions. NOT ALLOWED: any request for diagnosis, treatment, "
+    "or prescriptions."
 )
 
 ASSERTIONS = [ASSERTION_FINANCIAL, ASSERTION_MEDICAL]
 
 
 # ──────────────────────────────────────────────
-# Block responses — same as Qualifire UI default_response
+# Block responses
 # ──────────────────────────────────────────────
 RESPONSE_PROMPT_INJECTION = (
     "Nice try! I'm your productivity buddy and my focus is helping you get things done. "
@@ -90,6 +87,7 @@ def health():
         "status": "ok",
         "provider": "qualifire",
         "assertions": len(ASSERTIONS),
+        "policy_target": "input",
         "qualifire_key_set": bool(QUALIFIRE_API_KEY),
     })
 
@@ -129,7 +127,7 @@ def guardrail_webhook():
             "prompt_injections": True,
             "assertions": ASSERTIONS,
             "assertions_mode": "balanced",
-            "policy_target": "both",
+            "policy_target": "input",  # Check user input, not empty assistant response
             "messages": [
                 {"role": "user", "content": lastMsg},
                 {"role": "assistant", "content": ""},
@@ -210,15 +208,13 @@ def _get_block_message(data):
                 # ── Policy assertions ──
                 if "assertion" in rtype or "policy" in rtype:
 
-                    # Try index match (assertion_0, assertion_1, etc.)
+                    # Try index match (assertion_0 = financial, assertion_1 = medical)
                     try:
                         idx = int("".join(filter(str.isdigit, name)))
-                        if idx == 0 or idx == 1:
-                            # index 0 = financial, index 1 = medical
-                            if idx == 0:
-                                return RESPONSE_FINANCIAL, "assertion_index_0_financial"
-                            else:
-                                return RESPONSE_MEDICAL, "assertion_index_1_medical"
+                        if idx == 0:
+                            return RESPONSE_FINANCIAL, "assertion_index_0_financial"
+                        elif idx == 1:
+                            return RESPONSE_MEDICAL, "assertion_index_1_medical"
                     except (ValueError, IndexError):
                         pass
 
@@ -236,7 +232,7 @@ def _get_block_message(data):
                     if any(kw in name for kw in ["medical", "therapeutic", "health"]):
                         return RESPONSE_MEDICAL, "name_medical"
 
-                    log(f"  [WARN] Assertion failed but no keyword match — using first assertion response")
+                    log(f"  [WARN] Assertion failed but no keyword match — defaulting to financial")
                     return RESPONSE_FINANCIAL, "assertion_fallback"
 
     log(f"  [WARN] No match found — using default")
@@ -247,5 +243,6 @@ def _get_block_message(data):
 if __name__ == "__main__":
     log(f"\nQualifire Guardrail Webhook Ready")
     log(f"Assertions: {len(ASSERTIONS)}")
+    log(f"Policy target: input")
     log(f"API Key set: {bool(QUALIFIRE_API_KEY)}")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
