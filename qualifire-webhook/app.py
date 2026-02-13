@@ -156,7 +156,7 @@ def guardrail_webhook():
         score = result.get("score")
         log(f"status={status}, score={score}")
 
-        if status in ("fail", "failed") or (score is not None and score <= 50):
+        if status in ("fail", "failed", "warning") or (score is not None and score <= 75):
             overrideMsg, matchType = _get_block_message(result)
             log(f"BLOCKED [{matchType}]: {overrideMsg[:80]}")
 
